@@ -92,7 +92,7 @@ int main(int argc_in, char* argv_in[]) {
         std::cerr << "  --cw-law=const|grasso  --qw-supg   (diagnostics of the wind transport term Qw)" << std::endl;
         std::cerr << "  --ns-legacy (pre-v3 coupling: temperature input, 1 km window, cold, fixed horizon, v=b)" << std::endl;
         std::cerr << "  --ns-solver=kron|mumps (default kron: Kronecker-product ADS solves; mumps: sparse direct, the pre-1f solver)" << std::endl;
-        std::cerr << "  --ns-warm|--ns-cold (default warm) --ns-bc=uniform|farfield --ns-fields-n=<n> --ns-no-fields --ns-no-keep-io" << std::endl;
+        std::cerr << "  --ns-warm|--ns-cold (default warm) --ns-bc=uniform|farfield --ns-fields-n=<n> --ns-no-fields --ns-fields-every=<n> --ns-inflow-diag --ns-no-keep-io" << std::endl;
         std::cerr << std::endl;
         std::cerr << "Example:" << std::endl;
         std::cerr << "  ./fire_grasslands 400 200 2 4 grasslands_fuel.data 50 25 2000 1e-4 0.0 0.0 200 -1 100 50 1 1500" << std::endl;
@@ -284,11 +284,13 @@ int main(int argc_in, char* argv_in[]) {
             cc.normalize_sink = opt.integer("ns-normalize-sink", 1) != 0;
         }
         cc.save_fields = !opt.has("ns-no-fields");
+        cc.fields_every = std::max(1, opt.integer("ns-fields-every", cc.fields_every));
         cc.keep_io = !opt.has("ns-no-keep-io");
         cc.factor_cache = opt.has("ns-factor-cache");
         cc.inproc = opt.has("ns-inproc");
         cc.ns_threads = opt.integer("ns-threads", cc.ns_threads);
         cc.dt_max_s = opt.num("ns-dt-max", cc.dt_max_s);
+        cc.inflow_diag = opt.has("ns-inflow-diag");
         cc.rot_diag = opt.has("ns-rot-diag");
         {
             const std::string slv = opt.str("ns-solver", "kron");

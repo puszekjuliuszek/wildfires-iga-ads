@@ -133,6 +133,7 @@ public:
 
         bool normalize_sink = true;
         bool save_fields = true;
+        int fields_every = 1;
         bool keep_io = true;
 
         bool timing = false;
@@ -150,6 +151,7 @@ public:
         int csv_every = 1;
 
         bool rot_diag = false;
+        bool inflow_diag = false;
 
         std::string sink_law = "legacy";
         double kb_phys = -1.0;
@@ -732,7 +734,7 @@ private:
             prm.out_ny = w.nsy;
             prm.fields_nx = fnx;
             prm.fields_ny = fny;
-            if (cfg.save_fields) {
+            if (cfg.save_fields && k % cfg.fields_every == 0) {
                 prm.save_prefix = std::string("ns_cycle_") + tag;
             }
             prm.diag_file = "ns_diag.txt";
@@ -773,7 +775,7 @@ private:
         if (cfg.warm) {
             cmd << " --warm --state=ns_state.bin";
         }
-        if (cfg.save_fields) {
+        if (cfg.save_fields && k % cfg.fields_every == 0) {
             cmd << " --save-prefix=ns_cycle_" << tag << " --fields-nx=" << fnx
                 << " --fields-ny=" << fny;
         }
@@ -849,6 +851,66 @@ private:
                 wf_bx[i * my + j] = u_real_mps * fire_time_unit_s / scale_x_m;
                 wf_by[i * my + j] = v_real_mps * fire_time_unit_s / scale_y_m;
             }
+        }
+                if (cfg.inflow_diag) {
+            double best = -1.0, bx_at = 0.0, by_at = 0.0;
+            for (int i = 0; i < mx; ++i) {
+                for (int j = 0; j < my; ++j) {
+                    const double dux = ubar_v[i * my + j] * COUPLING_U_MPS - bx_mps;
+                    const double duy = vbar_v[i * my + j] * COUPLING_U_MPS - by_mps;
+                    const double m = std::sqrt(dux * dux + duy * duy);
+                    if (m > best) {
+                        best = m;
+                        bx_at = (w.x0_m + (mx > 1 ? static_cast<double>(i) / (mx - 1) : 0.0) * w.wx_m) / scale_x_m;
+                        by_at = (w.y0_m + (my > 1 ? static_cast<double>(j) / (my - 1) : 0.0) * w.wy_m) / scale_y_m;
+                    }
+                }
+            }
+
+            double vS = 0.0, band_mean = 0.0, band_p95 = 0.0;
+            long band_n = 0;
+            if (inproc && ip_grid.T.size() == static_cast<std::size_t>(mx) * my) {
+                double rmax = 0.0, sum_r = 0.0, sum_rm = 0.0;
+                for (double r : ip_grid.T) {
+                    rmax = std::max(rmax, r);
+                }
+                std::vector<double> bm;
+                for (int i = 0; i < mx; ++i) {
+                    for (int j = 0; j < my; ++j) {
+                        const double r = ip_grid.T[i * my + j];
+                        if (r <= 0.0) {
+                            continue;
+                        }
+                        const double dux = ubar_v[i * my + j] * COUPLING_U_MPS - bx_mps;
+                        const double duy = vbar_v[i * my + j] * COUPLING_U_MPS - by_mps;
+                        const double m = std::sqrt(dux * dux + duy * duy);
+                        sum_r += r;
+                        sum_rm += r * m;
+                        if (r >= 0.1 * rmax) {
+                            bm.push_back(m);
+                        }
+                    }
+                }
+                band_n = static_cast<long>(bm.size());
+                if (sum_r > 0.0 && band_n > 0) {
+                    vS = sum_rm / sum_r;
+                    for (double m : bm) {
+                        band_mean += m;
+                    }
+                    band_mean /= static_cast<double>(band_n);
+                    const std::size_t q = static_cast<std::size_t>(0.95 * (bm.size() - 1));
+                    std::nth_element(bm.begin(), bm.begin() + q, bm.end());
+                    band_p95 = bm[q];
+                }
+            }
+            const bool need_header = !std::ifstream("inflow_diag.csv").good();
+            std::ofstream ifs("inflow_diag.csv", std::ios::app);
+            if (need_header) {
+                ifs << "cycle,step,max_vb_mps,x_sim,y_sim,vS_mps,band_mean_mps,band_p95_mps,band_n\n";
+            }
+            ifs.precision(10);
+            ifs << k << "," << step_now << "," << best << "," << bx_at << "," << by_at << "," << vS << ","
+                << band_mean << "," << band_p95 << "," << band_n << "\n";
         }
         wind_field_active = true;
         last_coupling_step = step_now;
