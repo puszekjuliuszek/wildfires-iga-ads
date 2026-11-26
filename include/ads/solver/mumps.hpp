@@ -11,6 +11,7 @@
 #    include <dmumps_c.h>
 #    include <mpi.h>
 
+#    include <chrono>
 #    include <cstdint>
 #    include <cstdio>
 #    include <iostream>
@@ -63,9 +64,15 @@ private:
     int n;
 };
 
+struct phase_timers {
+    double analyze_s = 0, factorize_s = 0, solve_s = 0;
+    long calls = 0;
+};
+
 class solver {
 private:
     DMUMPS_STRUC_C id{};
+    phase_timers timers_;
 
     int& icntl(int idx) { return id.icntl[idx - 1]; }
 
@@ -81,9 +88,14 @@ private:
 
 public:
     solver() {
-        int argc = 0;
-        char** argv = nullptr;
-        MPI_Init(&argc, &argv);
+        int mpi_up = 0;
+        MPI_Initialized(&mpi_up);
+        if (!mpi_up) {
+            int argc = 0;
+            char** argv = nullptr;
+            MPI_Init(&argc, &argv);
+        }
+        ++instances_();
 
         id.job = -1;
         id.par = 1;
@@ -104,7 +116,7 @@ public:
         // icntl(29) = 2;
 
         // extra space factor
-        icntl(14) = 20;
+        icntl(14) = 200;
 
         // null pivot detection
         //icntl(24) = 1;
@@ -143,20 +155,57 @@ public:
         analyze_();
     }
 
+    const phase_timers& timers() const { return timers_; }
+
     void solve(problem& problem, const char* output_path = nullptr) {
+        using clk = std::chrono::steady_clock;
+        auto sec = [](clk::time_point a, clk::time_point b) {
+            return std::chrono::duration<double>(b - a).count();
+        };
+
         prepare_(problem);
 
         if (output_path != nullptr) {
             set_output_path(output_path);
         }
 
+        auto t0 = clk::now();
         analyze_();
         // std::cout << "Analysis type: " << infog(32) << std::endl;
         // std::cout << "Ordering used: " << infog(7) << std::endl;
         // report_after_analysis(std::cout);
+        auto t1 = clk::now();
         factorize_();
         // std::cout << "Deficiency: " << infog(28) << std::endl;
+        auto t2 = clk::now();
         solve_();
+        auto t3 = clk::now();
+        timers_.analyze_s += sec(t0, t1);
+        timers_.factorize_s += sec(t1, t2);
+        timers_.solve_s += sec(t2, t3);
+        ++timers_.calls;
+    }
+
+    void factorize(problem& problem) {
+        using clk = std::chrono::steady_clock;
+        prepare_(problem);
+        auto t0 = clk::now();
+        analyze_();
+        auto t1 = clk::now();
+        factorize_();
+        auto t2 = clk::now();
+        timers_.analyze_s += std::chrono::duration<double>(t1 - t0).count();
+        timers_.factorize_s += std::chrono::duration<double>(t2 - t1).count();
+    }
+
+    void solve_factored(double* rhs) {
+        auto t0 = std::chrono::steady_clock::now();
+        id.rhs = rhs;
+        id.nrhs = 1;
+        id.lrhs = id.n;
+        solve_();
+        timers_.solve_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        ++timers_.calls;
     }
 
     double flops_assembly() const { return rinfog(2); }
@@ -166,10 +215,17 @@ public:
     ~solver() {
         id.job = -2;
         dmumps_c(&id);
-        MPI_Finalize();
+        if (--instances_() == 0) {
+            MPI_Finalize();
+        }
     }
 
 private:
+    static int& instances_() {
+        static int n = 0;
+        return n;
+    }
+
     void prepare_(problem& problem) {
         id.n = problem.dofs();
         id.nz = problem.nonzero_entries();
@@ -184,8 +240,19 @@ private:
     }
 
     void factorize_() {
-        id.job = 2;
-        dmumps_c(&id);
+        constexpr int max_retries = 5;
+        for (int attempt = 0;; ++attempt) {
+            id.job = 2;
+            dmumps_c(&id);
+            if (id.info[0] != -9 || attempt >= max_retries) {
+                break;
+            }
+            const int old = icntl(14);
+            icntl(14) = old * 2;
+            std::cout << "[mumps] INFO(1) = -9 (workspace too small, missing " << id.info[1]
+                      << "); ICNTL(14) " << old << " -> " << icntl(14) << ", repeating factorization"
+                      << std::endl;
+        }
         print_state("After factorize_()");
     }
 
@@ -203,7 +270,6 @@ private:
 
     void set_output_path(const char* output_path) {
         constexpr auto size = sizeof(id.write_problem);
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg, hicpp-vararg)
         std::snprintf(id.write_problem, size, "%s", output_path);
     }
 
