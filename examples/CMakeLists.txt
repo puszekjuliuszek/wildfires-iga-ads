@@ -27,6 +27,7 @@ add_subdirectory(dg)
 add_subdirectory(co2_sequestration)
 add_subdirectory(fire)
 add_subdirectory(advection)
+add_subdirectory(wildfires_ns)
 
 # Installation rules for example executables
 get_target_property(
